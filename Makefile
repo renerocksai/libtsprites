@@ -11,10 +11,10 @@ SOFILE=lib/$(SONAME)
 LIBOBJFILE=lib/$(LIBRARY).o
 LIBINSTALLDIR=/usr/lib
 
-# CC=zig c++
-# CXX=zig c++
+CC=zig c++
+CXX=zig c++
 
-CXX=g++
+# CXX=g++
 
 CFLAGS+=-O3 -Wall 
 CXXFLAGS+=$(CFLAGS)

@@ -216,7 +216,12 @@ pub const TFrameSet = struct {
     frame_idx: usize = 0,
 };
 
+fn printf(msg: []const u8) void {
+    std.log.debug("{s}", .{msg});
+}
+
 pub const TSprite = struct {
+    alloc: std.mem.Allocator,
     w: usize = 0,
     h: usize = 0, // in blocks / "half characters"
     x: usize = 0,
@@ -247,20 +252,146 @@ pub const TSprite = struct {
 
     // rgb_color *background = 0, // for rendering
 
-    pub fn init() TSprite {
-        return .{};
+    pub fn init(alloc: std.mem.Allocator) TSprite {
+        return .{
+            .alloc = alloc,
+        };
     }
 
     // pub fn init_from_dims(w: usize, h: usize) TSprite { }
 
-    pub fn initFromCatimg(imgstr: []const u8) !TSprite {
-        var ret = TSprite{};
+    pub fn initFromCatimg(alloc: std.mem.Allocator, imgstr: []const u8) !TSprite {
+        var ret = TSprite{ .alloc = alloc };
         try ret.importFromImgStr(imgstr);
         return ret;
     }
 
     pub fn deinit(self: *TSprite) void {
         self.free_frames();
+        // and s_1down, etc
+    }
+
+    // should be removed in favor of deinit long-term
+    pub fn free_frames(self: *TSprite) void {
+        _ = self;
+    }
+
+    // instead of an error, we just use a bool for now
+    pub fn importFromImgStr(self: *TSprite, str: []const u8) !bool {
+        const hdr = CatImg.Hdr;
+        var width: usize = 0;
+        var height: usize = 0;
+        const l = str.len;
+
+        // -- check file "hdr": catimg esc seq 0x1b, 0x5b, 0x73 = "\x1b[s"
+        if (l < CatImg.Hdr.len) {
+            printf("[TS][ImportFromImgStr] ERROR: invalid file type!\n");
+            return false;
+        }
+
+        if (!std.mem.eql(u8, str[0..CatImg.Hdr.len], hdr)) {
+            printf("[TS][ImportFromImgStr] ERROR: invalid file type!\n");
+            return false;
+        }
+
+        // -- start conversion
+        var pos: usize = CatImg.Hdr.len; // start of 1st line
+        var lnr: usize = 0;
+
+        // result, ready2print char * string, with relative line ends
+        var outstr = self.alloc.allocate(u8, l + 4096) catch {
+            printf("[TS][ImportFromImgStr] ERROR: unable to alloc tmp mem!\n");
+            return false;
+        }; // surplus for new lineend encodings
+        // 0x0a -> esc: go w left, 1 down
+
+        // -- convert line by line
+        var lpos: usize = 0; // pos in line
+        var pxcount: usize = 0;
+        var out_idx: usize = 0;
+
+        while (pos < (l - (CatImg.LineEnd.len + CatImg.FileEnd.len))) {
+            // search end of line (0x0a)
+            // s[pos] = start of line
+            lpos = 0; // pos in line
+
+            while (str[pos + lpos + CatImg.LineEnd.len - 1] != 0x0a) {
+                const c = str[pos + lpos];
+
+                if (c == 0x96 or c == 0x20) {
+                    if (lnr == 0) {
+                        // count on 1st line only
+                        width += 1;
+                    }
+                    pxcount += 1;
+                }
+                lpos += 1;
+            }
+
+            // -- here we stand at line end, and have width:
+            // -> add this line + go left + go down to result
+            std.log.debug(
+                "\n[TS][ImportFromImgStr] line nr #{}, pos: {}, llen: {}\n",
+                .{ lnr, pos, lpos },
+            );
+
+            // copy line to result, out_idx is 0 now
+            std.mem.copy(u8, outstr[0..lpos], str[pos .. pos + lpos]);
+            out_idx = lpos;
+
+            // TODO: rene the following copies could be avoided if we printed directly into outstr
+
+            // create new, relative line end
+            const clear_str: []const u8 = "\x1b[0m"; // clear all modes
+            std.mem.copy(u8, outstr[out_idx .. out_idx + clear_str.len], clear_str[0..clear_str.len]);
+            out_idx += clear_str.len;
+
+            // cursor go left(lpos)
+            const goleft_str = try std.fmt.bufPrint(outstr[out_idx..outstr.len], "\x1b[{}D", .{width});
+            out_idx += goleft_str.len;
+
+            const godown_str: []const u8 = "\x1b[1B"; // cursor go down(1)
+            std.mem.copy(u8, outstr[out_idx .. out_idx + godown_str.len], godown_str[0..godown_str.len]);
+            out_idx += goleft_str.len;
+
+            lpos += CatImg.LineEnd.len;
+
+            lnr += 1;
+            height += 2; // 1 char = 2 blocks high
+
+            pos += lpos;
+        }
+        outstr[out_idx] = 0x00; // conversion done
+
+        std.log.debug(
+            "\nw[TS][ImportFromImgStr] x h = {} x {} = pxcount = {}, tt px-size of conversion: {}\n",
+            .{ width, height, pxcount, out_idx },
+        );
+
+        // -- now we have w, h -> we know image size and can create and
+        // fill maps / a new frame:
+
+        var F: *TSPriteFrame = self.add_frames(1, width, height);
+        F.s = try self.alloc.dupe(u8, outstr[0..out_idx]);
+
+        // -- fill maps from input string
+        self.imgstr_2maps(str, F);
+
+        // -- create 1down representation, store in frame
+        self.create_1down_str(F);
+
+        // Skip, when called for further frames:
+        // Sprite gets initialized only from 1st frame (frame 0)
+        if (self.fs) |*fs| {
+            if (fs.frame_count == 1) {
+                self.s = outstr;
+                self.h = height;
+                self.w = width;
+                self.s_1down = try self.alloc.dupe(u8, F.s_1down);
+            }
+        }
+
+        return true;
     }
 };
 
